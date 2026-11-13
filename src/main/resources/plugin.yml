@@ -1,0 +1,15 @@
+name: ChaosMindController
+version: 0.1.0
+main: com.chaosmagic.mind.ChaosMindController
+api-version: '1.21.11'
+description: Experimental Scarlet Witch mob possession controller
+commands:
+  mindpossess:
+    description: Possess the nearest mob in your line of sight (testing only)
+    permission: chaos.mind
+  mindrelease:
+    description: Release possession
+    permission: chaos.mind
+permissions:
+  chaos.mind:
+    default: op
