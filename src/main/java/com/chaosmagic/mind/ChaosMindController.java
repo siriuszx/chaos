@@ -7,6 +7,8 @@ import org.bukkit.GameMode;
 import org.bukkit.Input;
 import org.bukkit.Location;
 import org.bukkit.Particle;
+import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -31,7 +33,10 @@ import java.util.UUID;
 
 public final class ChaosMindController extends JavaPlugin implements Listener {
 
-    // Movement settings
+    // ==========================================
+    // MOVEMENT SETTINGS
+    // ==========================================
+
     private static final double WALK_SPEED = 0.34;
     private static final double SPRINT_SPEED = 0.48;
     private static final double JUMP_POWER = 0.43;
@@ -46,6 +51,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         Location home;
         GameMode oldMode;
         boolean oldAi;
+        boolean oldGravity;
 
         double verticalSpeed = 0;
         boolean jumpHeld = false;
@@ -57,13 +63,19 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             home = player.getLocation().clone();
             oldMode = player.getGameMode();
             oldAi = mob.hasAI();
+            oldGravity = mob.hasGravity();
         }
     }
+
+    // ==========================================
+    // PLUGIN STARTUP
+    // ==========================================
 
     @Override
     public void onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getScheduler().runTaskTimer(this, this::tick, 1L, 1L);
+
         getLogger().info("Chaos Mind Controller 0.4 enabled");
     }
 
@@ -71,13 +83,19 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
     public void onDisable() {
         for (UUID id : new ArrayList<>(sessions.keySet())) {
             Player player = Bukkit.getPlayer(id);
+
             if (player != null) {
                 release(player);
             }
         }
+
         sessions.clear();
         debugging.clear();
     }
+
+    // ==========================================
+    // COMMANDS
+    // ==========================================
 
     @Override
     public boolean onCommand(
@@ -93,6 +111,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
 
         UUID id = player.getUniqueId();
 
+        // EXIT POSSESSION
         if (command.getName().equalsIgnoreCase("mindrelease")) {
             release(player);
             return true;
@@ -103,6 +122,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         if (args.length > 0) {
             String action = args[0].toLowerCase();
 
+            // DEBUG
             if (action.equals("debug")) {
                 if (session == null) {
                     player.sendMessage("§cPossess a mob first.");
@@ -115,9 +135,11 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                     debugging.remove(id);
                     player.sendMessage("§cChaos Mind debug disabled.");
                 }
+
                 return true;
             }
 
+            // UPWARD PUSH TEST
             if (action.equals("push")) {
                 if (session == null) {
                     player.sendMessage("§cPossess a mob first.");
@@ -126,10 +148,12 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
 
                 session.verticalSpeed = 0.8;
                 session.pushTicks = 10;
+
                 player.sendMessage("§aTelekinetic upward push!");
                 return true;
             }
 
+            // TELEPORT STEP TEST
             if (action.equals("step")) {
                 if (session == null) {
                     player.sendMessage("§cPossess a mob first.");
@@ -139,16 +163,19 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                 Entity entity = Bukkit.getEntity(session.mobId);
 
                 if (entity instanceof Mob mob && mob.isValid()) {
-                    Location destination = mob.getLocation().add(0, 2, 0);
+                    Location destination = mob.getLocation().clone();
+                    destination.add(0, 2, 0);
 
                     if (canOccupy(mob, destination)) {
                         mob.teleport(destination);
                         session.verticalSpeed = 0;
+
                         player.sendMessage("§aStep test succeeded.");
                     } else {
                         player.sendMessage("§cNot enough space.");
                     }
                 }
+
                 return true;
             }
         }
@@ -158,6 +185,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             return true;
         }
 
+        // FIND MOB
         Entity target = player.getTargetEntity(30);
 
         if (!(target instanceof Mob mob)) {
@@ -175,6 +203,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         Session newSession = new Session(player, mob);
         sessions.put(id, newSession);
 
+        // Disable mob AI and vanilla gravity
         mob.setAI(false);
         mob.setGravity(false);
         mob.setVelocity(new Vector(0, 0, 0));
@@ -198,9 +227,16 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         return true;
     }
 
-    // Checks the mob's collision box at a proposed location.
+    // ==========================================
+    // COLLISION CHECKING - PAPER COMPATIBLE
+    // ==========================================
+
     private boolean canOccupy(Mob mob, Location destination) {
-        if (destination.getWorld() == null) return false;
+        World world = destination.getWorld();
+
+        if (world == null) {
+            return false;
+        }
 
         BoundingBox box = mob.getBoundingBox();
         Location current = mob.getLocation();
@@ -211,16 +247,50 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
 
         BoundingBox moved = box.clone().shift(dx, dy, dz);
 
-        return !destination.getWorld().hasCollisions(mob, moved);
+        // Check all blocks intersecting the moved mob bounding box.
+        int minX = (int) Math.floor(moved.getMinX());
+        int maxX = (int) Math.floor(moved.getMaxX());
+        int minY = (int) Math.floor(moved.getMinY());
+        int maxY = (int) Math.floor(moved.getMaxY());
+        int minZ = (int) Math.floor(moved.getMinZ());
+        int maxZ = (int) Math.floor(moved.getMaxZ());
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+
+                    Block block = world.getBlockAt(x, y, z);
+
+                    if (block.isPassable()) {
+                        continue;
+                    }
+
+                    BoundingBox blockBox = block.getBoundingBox();
+
+                    if (moved.overlaps(blockBox)) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 
-    // Detects solid ground directly underneath the mob.
+    // ==========================================
+    // GROUND DETECTION
+    // ==========================================
+
     private boolean isGrounded(Mob mob) {
         Location below = mob.getLocation().clone();
         below.subtract(0, 0.06, 0);
 
         return !canOccupy(mob, below);
     }
+
+    // ==========================================
+    // MAIN CONTROL LOOP
+    // ==========================================
 
     private void tick() {
         for (var entry : new ArrayList<>(sessions.entrySet())) {
@@ -237,12 +307,19 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             if (!(entity instanceof Mob mob)
                     || !mob.isValid()
                     || mob.isDead()) {
+
                 release(player);
                 continue;
             }
 
-            if (mob.hasAI()) mob.setAI(false);
-            if (mob.hasGravity()) mob.setGravity(false);
+            // Keep AI and vanilla gravity disabled
+            if (mob.hasAI()) {
+                mob.setAI(false);
+            }
+
+            if (mob.hasGravity()) {
+                mob.setGravity(false);
+            }
 
             Input input = player.getCurrentInput();
 
@@ -256,22 +333,39 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             // HORIZONTAL MOVEMENT
             // ==================================
 
-            double yaw = Math.toRadians(mob.getLocation().getYaw());
+            double yaw = Math.toRadians(
+                mob.getLocation().getYaw()
+            );
 
             Vector forward = new Vector(
-                -Math.sin(yaw), 0, Math.cos(yaw)
+                -Math.sin(yaw),
+                0,
+                Math.cos(yaw)
             );
 
             Vector right = new Vector(
-                -forward.getZ(), 0, forward.getX()
+                -forward.getZ(),
+                0,
+                forward.getX()
             );
 
             Vector horizontal = new Vector(0, 0, 0);
 
-            if (input.isForward()) horizontal.add(forward);
-            if (input.isBackward()) horizontal.subtract(forward);
-            if (input.isRight()) horizontal.add(right);
-            if (input.isLeft()) horizontal.subtract(right);
+            if (input.isForward()) {
+                horizontal.add(forward);
+            }
+
+            if (input.isBackward()) {
+                horizontal.subtract(forward);
+            }
+
+            if (input.isRight()) {
+                horizontal.add(right);
+            }
+
+            if (input.isLeft()) {
+                horizontal.subtract(right);
+            }
 
             if (horizontal.lengthSquared() > 0) {
                 horizontal.normalize();
@@ -289,7 +383,6 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
 
             boolean jumping = input.isJump();
 
-            // Jump only on a new Space press.
             if (jumping && !session.jumpHeld && grounded) {
                 session.verticalSpeed = JUMP_POWER;
                 grounded = false;
@@ -318,7 +411,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             Location current = mob.getLocation();
             Location destination = current.clone();
 
-            // Move separately along X and Z to allow wall sliding.
+            // X movement
             Location xMove = destination.clone();
             xMove.add(horizontal.getX(), 0, 0);
 
@@ -326,6 +419,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                 destination = xMove;
             }
 
+            // Z movement
             Location zMove = destination.clone();
             zMove.add(0, 0, horizontal.getZ());
 
@@ -333,12 +427,12 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                 destination = zMove;
             }
 
-            // Vertical movement in small increments prevents
-            // passing through floors during fast falls.
+            // Vertical movement
             double remaining = session.verticalSpeed;
             boolean verticalCollision = false;
 
             while (Math.abs(remaining) > 0.0001) {
+
                 double step = Math.max(
                     -0.2,
                     Math.min(0.2, remaining)
@@ -361,16 +455,17 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                 session.verticalSpeed = 0;
             }
 
-            // Only teleport when a position change is needed.
+            // Apply movement
             if (destination.distanceSquared(current) > 0.000001) {
                 mob.teleport(destination);
             }
 
             // ==================================
-            // ATTACK
+            // ATTACKING
             // ==================================
 
             if (input.isSneak() && session.attackCooldown == 0) {
+
                 session.attackCooldown = 12;
 
                 for (Entity nearby : mob.getNearbyEntities(
@@ -387,15 +482,18 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             }
 
             // ==================================
-            // VISUAL EFFECTS
+            // CRIMSON PARTICLES
             // ==================================
 
             if (Bukkit.getCurrentTick() % 4 == 0) {
+
                 mob.getWorld().spawnParticle(
                     Particle.DUST,
                     mob.getEyeLocation(),
                     3,
-                    0.22, 0.2, 0.22,
+                    0.22,
+                    0.2,
+                    0.22,
                     new Particle.DustOptions(
                         Color.fromRGB(190, 10, 40),
                         0.9f
@@ -404,7 +502,7 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             }
 
             // ==================================
-            // DEBUG DISPLAY
+            // DEBUG
             // ==================================
 
             if (debugging.contains(player.getUniqueId())
@@ -414,14 +512,22 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                     "§cW:" + input.isForward()
                     + " J:" + input.isJump()
                     + " Ground:" + isGrounded(mob)
-                    + " Y:" + String.format("%.2f", session.verticalSpeed)
+                    + " Y:" + String.format(
+                        "%.2f",
+                        session.verticalSpeed
+                    )
                     + " AI:" + mob.hasAI()
                 );
             }
         }
     }
 
+    // ==========================================
+    // RELEASE POSSESSION
+    // ==========================================
+
     private void release(Player player) {
+
         UUID id = player.getUniqueId();
 
         Session session = sessions.remove(id);
@@ -435,8 +541,9 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         Entity entity = Bukkit.getEntity(session.mobId);
 
         if (entity instanceof Mob mob && mob.isValid()) {
+
             mob.setAI(session.oldAi);
-            mob.setGravity(true);
+            mob.setGravity(session.oldGravity);
             mob.setVelocity(new Vector(0, 0, 0));
         }
 
@@ -447,20 +554,31 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         player.sendMessage("§cReturned to your own mind.");
     }
 
+    // ==========================================
+    // CLEANUP
+    // ==========================================
+
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        if (sessions.containsKey(event.getPlayer().getUniqueId())) {
+
+        if (sessions.containsKey(
+                event.getPlayer().getUniqueId())) {
+
             release(event.getPlayer());
         }
     }
 
     @EventHandler
     public void onDeath(EntityDeathEvent event) {
+
         for (var entry : new ArrayList<>(sessions.entrySet())) {
+
             if (entry.getValue().mobId.equals(
                     event.getEntity().getUniqueId())) {
 
-                Player player = Bukkit.getPlayer(entry.getKey());
+                Player player = Bukkit.getPlayer(
+                    entry.getKey()
+                );
 
                 if (player != null) {
                     release(player);
