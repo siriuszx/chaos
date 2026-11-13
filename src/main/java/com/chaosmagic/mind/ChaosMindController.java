@@ -33,27 +33,35 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
     private final Map<UUID, Session> sessions = new HashMap<>();
     private final Set<UUID> debugging = new HashSet<>();
 
-    private record Session(
-        UUID mobId,
-        Location home,
-        GameMode oldMode,
-        boolean oldAi
-    ) {}
+    private static final class Session {
+        UUID mobId;
+        Location home;
+        GameMode oldMode;
+        boolean oldAi;
+        int pushTicks = 0;
+        int jumpCooldown = 0;
+        int attackCooldown = 0;
+
+        Session(Mob mob, Player player) {
+            mobId = mob.getUniqueId();
+            home = player.getLocation().clone();
+            oldMode = player.getGameMode();
+            oldAi = mob.hasAI();
+        }
+    }
 
     @Override
     public void onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getScheduler().runTaskTimer(this, this::tick, 1L, 1L);
-        getLogger().info("Chaos Mind Controller 0.2 enabled");
+        getLogger().info("Chaos Mind Controller 0.3 enabled");
     }
 
     @Override
     public void onDisable() {
         for (UUID id : new ArrayList<>(sessions.keySet())) {
-            Player player = Bukkit.getPlayer(id);
-            if (player != null) {
-                release(player);
-            }
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) release(p);
         }
         sessions.clear();
         debugging.clear();
@@ -66,105 +74,135 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         @NotNull String label,
         @NotNull String[] args
     ) {
-        if (!(sender instanceof Player player)) {
+        if (!(sender instanceof Player p)) {
             sender.sendMessage("Players only.");
             return true;
         }
 
+        UUID id = p.getUniqueId();
+
         if (command.getName().equalsIgnoreCase("mindrelease")) {
-            release(player);
+            release(p);
             return true;
         }
 
-        UUID id = player.getUniqueId();
+        Session s = sessions.get(id);
 
-        // DEBUG MODE
-        if (args.length > 0 && args[0].equalsIgnoreCase("debug")) {
-            if (!sessions.containsKey(id)) {
-                player.sendMessage("§cPossess a mob first.");
+        if (args.length > 0) {
+            String action = args[0].toLowerCase();
+
+            if (action.equals("debug")) {
+                if (s == null) {
+                    p.sendMessage("§cPossess a mob first.");
+                    return true;
+                }
+
+                if (!debugging.add(id)) {
+                    debugging.remove(id);
+                    p.sendMessage("§cDebug disabled.");
+                } else {
+                    p.sendMessage("§aDebug enabled.");
+                }
                 return true;
             }
 
-            if (debugging.remove(id)) {
-                player.sendMessage("§cInput debugging disabled.");
-            } else {
-                debugging.add(id);
-                player.sendMessage("§aInput debugging enabled!");
-                player.sendMessage("§7Press WASD and Space.");
-            }
-            return true;
-        }
+            if (action.equals("push")) {
+                if (s == null) {
+                    p.sendMessage("§cPossess a mob first.");
+                    return true;
+                }
 
-        // FORCED VELOCITY TEST
-        if (args.length > 0 && args[0].equalsIgnoreCase("push")) {
-            Session session = sessions.get(id);
+                Entity e = Bukkit.getEntity(s.mobId);
 
-            if (session == null) {
-                player.sendMessage("§cPossess a mob first.");
+                if (e instanceof Mob mob && mob.isValid()) {
+                    s.pushTicks = 25;
+                    mob.setVelocity(new Vector(0, 1.2, 0));
+                    p.sendMessage("§aPush applied for testing.");
+                }
                 return true;
             }
 
-            Entity entity = Bukkit.getEntity(session.mobId());
+            if (action.equals("step")) {
+                if (s == null) {
+                    p.sendMessage("§cPossess a mob first.");
+                    return true;
+                }
 
-            if (entity instanceof Mob mob && mob.isValid()) {
-                mob.setVelocity(new Vector(0, 1.2, 0));
-                player.sendMessage("§aFORCED PUSH EXECUTED!");
-                player.sendMessage("§7The mob should launch upward.");
-            } else {
-                player.sendMessage("§cPossessed mob not found.");
+                Entity e = Bukkit.getEntity(s.mobId);
+
+                if (e instanceof Mob mob && mob.isValid()) {
+                    Location destination = mob.getLocation().clone();
+                    destination.add(0, 2, 0);
+
+                    if (isSafeSpace(destination, mob)) {
+                        boolean success = mob.teleport(destination);
+                        p.sendMessage(
+                            success
+                                ? "§aTeleport step succeeded."
+                                : "§cTeleport step failed."
+                        );
+                    } else {
+                        p.sendMessage("§cNo clear space above mob.");
+                    }
+                }
+                return true;
             }
+        }
 
+        if (s != null) {
+            p.sendMessage("§cAlready possessing. /mindrelease to exit.");
             return true;
         }
 
-        if (sessions.containsKey(id)) {
-            player.sendMessage("§cAlready possessing.");
-            return true;
-        }
-
-        Entity target = player.getTargetEntity(30);
+        Entity target = p.getTargetEntity(30);
 
         if (!(target instanceof Mob mob)) {
-            player.sendMessage("§cLook at a mob within 30 blocks.");
+            p.sendMessage("§cLook directly at a mob within 30 blocks.");
             return true;
         }
 
-        // Prevent two players controlling the same mob
         for (Session existing : sessions.values()) {
-            if (existing.mobId().equals(mob.getUniqueId())) {
-                player.sendMessage("§cThat mind is already occupied.");
+            if (existing.mobId.equals(mob.getUniqueId())) {
+                p.sendMessage("§cThat mob is already possessed.");
                 return true;
             }
         }
 
-        Session session = new Session(
-            mob.getUniqueId(),
-            player.getLocation().clone(),
-            player.getGameMode(),
-            mob.hasAI()
-        );
-
+        Session session = new Session(mob, p);
         sessions.put(id, session);
 
         mob.setAI(false);
         mob.setVelocity(new Vector(0, 0, 0));
 
-        player.setGameMode(GameMode.SPECTATOR);
+        p.setGameMode(GameMode.SPECTATOR);
 
         Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (sessions.containsKey(id)
-                    && player.isOnline()
+            if (sessions.get(id) == session
+                    && p.isOnline()
                     && mob.isValid()) {
 
-                player.setSpectatorTarget(mob);
+                p.setSpectatorTarget(mob);
 
-                player.sendMessage("§4Chaos Mind §cactivated!");
-                player.sendMessage("§7WASD: Move | Space: Jump");
-                player.sendMessage("§7/mindpossess debug");
-                player.sendMessage("§7/mindpossess push");
-                player.sendMessage("§7/mindrelease");
+                p.sendMessage("§4Chaos Mind 0.3 §cactivated!");
+                p.sendMessage("§7WASD: Move | Space: Jump | Shift: Attack");
+                p.sendMessage("§7/mindpossess debug");
+                p.sendMessage("§7/mindpossess push");
+                p.sendMessage("§7/mindpossess step");
+                p.sendMessage("§7/mindrelease");
             }
         }, 2L);
+
+        return true;
+    }
+
+    private boolean isSafeSpace(Location loc, Mob mob) {
+        if (!loc.getBlock().isPassable()) return false;
+
+        // Check head space for taller mobs.
+        if (mob.getHeight() > 1.0) {
+            Location head = loc.clone().add(0, 1, 0);
+            if (!head.getBlock().isPassable()) return false;
+        }
 
         return true;
     }
@@ -173,13 +211,11 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
         for (var entry : new ArrayList<>(sessions.entrySet())) {
 
             Player player = Bukkit.getPlayer(entry.getKey());
-            Session session = entry.getValue();
+            Session s = entry.getValue();
 
-            if (player == null || !player.isOnline()) {
-                continue;
-            }
+            if (player == null || !player.isOnline()) continue;
 
-            Entity entity = Bukkit.getEntity(session.mobId());
+            Entity entity = Bukkit.getEntity(s.mobId);
 
             if (!(entity instanceof Mob mob)
                     || !mob.isValid()
@@ -188,25 +224,34 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                 continue;
             }
 
+            // Keep the mob's AI disabled during possession.
+            if (mob.hasAI()) mob.setAI(false);
+
             Input input = player.getCurrentInput();
 
-            // DEBUG: DISPLAY ACTUAL JAVA INPUT
-            if (debugging.contains(player.getUniqueId())) {
-                if (Bukkit.getCurrentTick() % 10 == 0) {
+            if (s.jumpCooldown > 0) s.jumpCooldown--;
+            if (s.attackCooldown > 0) s.attackCooldown--;
 
-                    String status =
-                        "§cW:" + input.isForward()
-                        + " A:" + input.isLeft()
-                        + " S:" + input.isBackward()
-                        + " D:" + input.isRight()
-                        + " J:" + input.isJump()
-                        + " AI:" + mob.hasAI();
+            if (debugging.contains(player.getUniqueId())
+                    && Bukkit.getCurrentTick() % 10 == 0) {
 
-                    player.sendActionBar(status);
-                }
+                player.sendActionBar(
+                    "§cW:" + input.isForward()
+                    + " A:" + input.isLeft()
+                    + " S:" + input.isBackward()
+                    + " D:" + input.isRight()
+                    + " J:" + input.isJump()
+                    + " AI:" + mob.hasAI()
+                    + " P:" + s.pushTicks
+                );
             }
 
-            // MOVEMENT
+            // Let the forced velocity test run without interference.
+            if (s.pushTicks > 0) {
+                s.pushTicks--;
+                continue;
+            }
+
             double yaw = Math.toRadians(mob.getLocation().getYaw());
 
             Vector forward = new Vector(
@@ -224,38 +269,35 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
             if (input.isRight()) movement.add(right);
             if (input.isLeft()) movement.subtract(right);
 
+            // Horizontal movement by controlled repositioning.
             if (movement.lengthSquared() > 0) {
-                movement.normalize().multiply(
-                    input.isSprint() ? 0.38 : 0.24
-                );
+                double speed = input.isSprint() ? 0.28 : 0.18;
+
+                movement.normalize().multiply(speed);
+
+                Location destination = mob.getLocation().clone();
+                destination.add(movement);
+
+                if (isSafeSpace(destination, mob)) {
+                    mob.teleport(destination);
+                }
             }
 
-            double vertical = mob.getVelocity().getY();
+            // Jump using velocity, without immediately overwriting it.
+            if (input.isJump()
+                    && mob.isOnGround()
+                    && s.jumpCooldown == 0) {
 
-            if (input.isJump() && mob.isOnGround()) {
-                vertical = 0.43;
+                Vector velocity = mob.getVelocity();
+                velocity.setY(0.48);
+                mob.setVelocity(velocity);
+
+                s.jumpCooldown = 12;
             }
 
-            movement.setY(vertical);
-            mob.setVelocity(movement);
-
-            // CRIMSON POSSESSION PARTICLES
-            if (Bukkit.getCurrentTick() % 4 == 0) {
-                mob.getWorld().spawnParticle(
-                    Particle.DUST,
-                    mob.getEyeLocation(),
-                    3,
-                    0.22, 0.2, 0.22,
-                    new Particle.DustOptions(
-                        Color.fromRGB(190, 10, 40),
-                        0.9f
-                    )
-                );
-            }
-
-            // SNEAK ATTACK
-            if (input.isSneak()
-                    && Bukkit.getCurrentTick() % 12 == 0) {
+            // Shift attack (spectator left-click is unreliable).
+            if (input.isSneak() && s.attackCooldown == 0) {
+                s.attackCooldown = 12;
 
                 for (Entity nearby : mob.getNearbyEntities(
                         2.3, 1.7, 2.3)) {
@@ -269,31 +311,43 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
                     }
                 }
             }
+
+            if (Bukkit.getCurrentTick() % 4 == 0) {
+                mob.getWorld().spawnParticle(
+                    Particle.DUST,
+                    mob.getEyeLocation(),
+                    3,
+                    0.22, 0.2, 0.22,
+                    new Particle.DustOptions(
+                        Color.fromRGB(190, 10, 40),
+                        0.9f
+                    )
+                );
+            }
         }
     }
 
-    private void release(Player player) {
-        UUID id = player.getUniqueId();
-
-        Session session = sessions.remove(id);
+    private void release(Player p) {
+        UUID id = p.getUniqueId();
+        Session s = sessions.remove(id);
         debugging.remove(id);
 
-        if (session == null) {
-            player.sendMessage("§cNot possessing a mob.");
+        if (s == null) {
+            p.sendMessage("§cNot possessing a mob.");
             return;
         }
 
-        Entity entity = Bukkit.getEntity(session.mobId());
+        Entity entity = Bukkit.getEntity(s.mobId);
 
         if (entity instanceof Mob mob && mob.isValid()) {
-            mob.setAI(session.oldAi());
+            mob.setAI(s.oldAi);
         }
 
-        player.setSpectatorTarget(null);
-        player.setGameMode(session.oldMode());
-        player.teleport(session.home());
+        p.setSpectatorTarget(null);
+        p.setGameMode(s.oldMode);
+        p.teleport(s.home);
 
-        player.sendMessage("§cReturned to your own mind.");
+        p.sendMessage("§cReturned to your own mind.");
     }
 
     @EventHandler
@@ -306,14 +360,11 @@ public final class ChaosMindController extends JavaPlugin implements Listener {
     @EventHandler
     public void onDeath(EntityDeathEvent event) {
         for (var entry : new ArrayList<>(sessions.entrySet())) {
-            if (entry.getValue().mobId()
-                    .equals(event.getEntity().getUniqueId())) {
+            if (entry.getValue().mobId.equals(
+                    event.getEntity().getUniqueId())) {
 
-                Player player = Bukkit.getPlayer(entry.getKey());
-
-                if (player != null) {
-                    release(player);
-                }
+                Player p = Bukkit.getPlayer(entry.getKey());
+                if (p != null) release(p);
             }
         }
     }
